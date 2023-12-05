@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	packagecloud "github.com/atotto/packagecloud/api/v1"
 	"github.com/google/subcommands"
 	"github.com/mattn/go-zglob"
+	packagecloud "github.com/tyklabs/packagecloud/api/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -110,7 +110,7 @@ var searchPackageCommand = &commandBase{
 			return subcommands.ExitUsageError
 		}
 		query := f.Arg(1)
-		details, err := packagecloud.SearchPackage(ctx, repos, distro, query, "")
+		details, err := packagecloud.SearchPackage(ctx, repos, distro, 0, query, "")
 		if err != nil {
 			log.Println(err)
 			return subcommands.ExitFailure
@@ -138,7 +138,7 @@ var pullPackageCommand = &commandBase{
 			return subcommands.ExitUsageError
 		}
 		query := f.Arg(1)
-		details, err := packagecloud.SearchPackage(ctx, repos, distro, query, "")
+		details, err := packagecloud.SearchPackage(ctx, repos, distro, 0, query, "")
 		if err != nil {
 			log.Println(err)
 			return subcommands.ExitFailure
