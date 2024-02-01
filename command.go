@@ -240,7 +240,7 @@ var promoteVersionPackageCommand = &commandBase{
 	"promoteversion",
 	"promoteversion all packages having the given version",
 	"promote name/src_repo version name/dst_repo",
-	[]string{"packagecloud promoteversion 1.0.0 example-user/repo-unstable example-user/repo-stable"},
+	[]string{"packagecloud promoteversion example-user/repo-unstable  1.0.0 example-user/repo-stable"},
 	func(f *flag.FlagSet) {
 		f.BoolVar(&promoteVersionDryRun, "dryrun", false, "Do not actually promote, just list the ones that will be promoted")
 
@@ -282,16 +282,33 @@ var promoteVersionPackageCommand = &commandBase{
 			log.Printf("No packages to promote")
 			return subcommands.ExitFailure
 		}
-		for _, pkg := range promoteList {
+		log.Println("Promoting packages..")
+		summaryDistro := make(map[string][]string)
+		var summaryArch []string
+		var num int
+		var pkg packagecloud.PackageDetail
+		for num, pkg = range promoteList {
 			distro := strings.Split(pkg.DistroVersion, "/")
-			log.Printf("Promoting package %s(%s/%s) from %s->%s", pkg.Filename, distro[0], distro[1], srcRepo, dstRepo)
+			info, err := packagecloud.ShowPackage(ctx, pkg.PackageURL)
+			if err != nil {
+				log.Println(err)
+				return subcommands.ExitFailure
+			}
 			if !promoteVersionDryRun {
 				if err := packagecloud.PromotePackage(ctx, dstRepo, srcRepo, distro[0], distro[1], pkg.Filename); err != nil {
 					log.Println(err)
 					return subcommands.ExitFailure
 				}
+			} else {
+				log.Printf("Promoting package %s(%s/%s) from %s->%s", pkg.Filename, distro[0], distro[1], srcRepo, dstRepo)
 			}
+			summaryDistro[pkg.Type] = append(summaryDistro[pkg.Type], info.DistroVersion)
+			summaryArch = append(summaryArch, info.Arch)
 		}
+		// display a nice summary about the promotion
+		fmt.Printf("%d packages having %s architectures for %s were promoted from %s to %s\n", num+1, strings.Join(uniqueSummary(summaryArch), ","), version, srcRepo, dstRepo)
+		fmt.Printf("Debian versions: %s\n", strings.Join(uniqueSummary(summaryDistro["deb"]), ","))
+		fmt.Printf("Debian versions: %s\n", strings.Join(uniqueSummary(summaryDistro["rpm"]), ","))
 		return subcommands.ExitSuccess
 	},
 }
@@ -309,6 +326,26 @@ func splitPackageTarget(target string) (repos, distro, version string, n int) {
 		version = ss[3]
 	}
 	return
+}
+
+// uniqueSummary takes a slice having package promotion summary list(slice)
+// and returns a slice with unique elements after removing any similiar entries
+func uniqueSummary(in []string) []string {
+	var u []string
+	t := make(map[string]bool)
+	for _, v := range in {
+		switch v {
+		case "aarch64":
+			v = "arm64"
+		case "x86_64":
+			v = "amd64"
+		}
+		if _, ok := t[v]; !ok {
+			t[v] = true
+			u = append(u, v)
+		}
+	}
+	return u
 }
 
 var helpDistroCommand = &commandBase{

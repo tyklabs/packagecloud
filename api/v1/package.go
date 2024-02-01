@@ -27,9 +27,9 @@ type PackageDetail struct {
 	DistroVersion      string    `json:"distro_version"`
 	CreateTime         time.Time `json:"created_at"`
 	Version            string    `json:"version"`
-	Type               string    `json:"type"`
 	Filename           string    `json:"filename"`
 	Size               string    `json:"size"`
+	Type               string    `json:"type"`
 	UploaderName       string    `json:"uploader_name"`
 	Indexed            bool      `json:"indexed"`
 	PackageURL         string    `json:"package_url"`
@@ -37,6 +37,39 @@ type PackageDetail struct {
 	DownloadsCountURL  string    `json:"downloads_count_url"`
 	DownloadsDetailURL string    `json:"downloads_detail_url"`
 	Md5Sum             string    `json:"md5sum"`
+}
+
+func ShowPackage(ctx context.Context, packageURL string) (PackageDetail, error) {
+	var detail PackageDetail
+	var buf bytes.Buffer
+	url := "https://packagecloud.io" + packageURL
+	req, err := http.NewRequest("GET", url, &buf)
+	if err != nil {
+		return detail, status.Errorf(codes.InvalidArgument, "http newrequest err: %v", err)
+	}
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Accept", "application/json")
+
+	token := packagecloudToken(ctx)
+	req.SetBasicAuth(token, "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return detail, status.Errorf(codes.InvalidArgument, "http get err: %v", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		err := json.NewDecoder(resp.Body).Decode(&detail)
+		if err != nil {
+			return detail, status.Errorf(codes.Internal, "json parse err: %v", err)
+		}
+	default:
+		b, _ := io.ReadAll(resp.Body)
+		return detail, status.Errorf(codes.Internal, "invalid response: %s err: %q", resp.Status, b)
+	}
+
+	return detail, nil
 }
 
 func PushPackage(ctx context.Context, repos, distro, version string, fpath string) (PackageDetail, error) {
@@ -208,7 +241,7 @@ func PromotePackage(ctx context.Context, dstRepos, srcRepo, distro, version stri
 
 	_, fname := filepath.Split(fpath)
 	url := fmt.Sprintf("https://packagecloud.io/api/v1/repos/%s/%s/%s/%s/promote.json", srcRepo, distro, version, fname)
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequest("POST", url, &buf)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "http request: %s", err)
 	}
