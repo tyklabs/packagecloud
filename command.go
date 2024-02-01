@@ -307,8 +307,8 @@ var promoteVersionPackageCommand = &commandBase{
 		}
 		// display a nice summary about the promotion
 		fmt.Printf("%d packages having %s architectures for %s were promoted from %s to %s\n", num+1, strings.Join(uniqueSummary(summaryArch), ","), version, srcRepo, dstRepo)
-		fmt.Printf("Debian versions: %s\n", strings.Join(uniqueSummary(summaryDistro["deb"]), ","))
-		fmt.Printf("Debian versions: %s\n", strings.Join(uniqueSummary(summaryDistro["rpm"]), ","))
+		fmt.Printf("Debian based distro versions: %s\n", strings.Join(uniqueSummary(summaryDistro["deb"]), ","))
+		fmt.Printf("RPM based distro versions: %s\n", strings.Join(uniqueSummary(summaryDistro["rpm"]), ","))
 		return subcommands.ExitSuccess
 	},
 }
