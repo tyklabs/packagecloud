@@ -100,23 +100,15 @@ var pushPackageCommand = &commandBase{
 			// Retrieve the package details provided by packagecloud and verify md5sum to that from
 			// the file on disk
 			if pushPackageCommandVerifyExist {
-				fd, err := os.OpenFile(file, os.O_RDONLY, 0444)
+				verified, err := verifyPackagePush(details, file)
 				if err != nil {
-					log.Printf("Error opening file: %s: %v", file, err)
+					log.Printf("Error verifying push: %s(%s/%s): %v", file, distro, version, err)
 					return subcommands.ExitFailure
 				}
-				defer fd.Close()
-				h := md5.New()
-				_, err = io.Copy(h, fd)
-				if err != nil {
-					log.Printf("I/O error: calculating md5sum: %s: %v", file, err)
-				}
-				md5Sum := hex.EncodeToString(h.Sum(nil))
-				if details.Md5Sum != md5Sum {
-					log.Printf("File checksums different: on disk: %s, on packagecloud: %s", md5Sum, details.Md5Sum)
+				if !verified {
+					log.Printf("md5sum verification failed for package on remote: %s(%s/%s)", file, distro, version)
 					return subcommands.ExitFailure
 				}
-				log.Printf("md5sum of file on disk: %s, on pc remote: %s", md5Sum, details.Md5Sum)
 			}
 		}
 
@@ -311,6 +303,117 @@ var promoteVersionPackageCommand = &commandBase{
 		fmt.Printf("RPM based distro versions: %s\n", strings.Join(uniqueSummary(summaryDistro["rpm"]), ","))
 		return subcommands.ExitSuccess
 	},
+}
+
+var publishPackageCommandDebvers string
+var publishPackageCommandRpmvers string
+var publishPackageCommandDryRun bool
+var publishPackageCommand = &commandBase{
+	"publish",
+	"publish a deb/rpm package across multiple distro versions, " +
+		"please provide --debversions or --rpmversions accordingly",
+	`publish [--rpmvers  "distro/ver1 distro/ver2..."] [--debvers "distro/ver1 distro/ver2"...]  name/repo filepath`,
+	[]string{`push a deb package to ubuntu/jammy, debian/bookworm and debian/bullseye:
+	packagecloud publish --debvers "ubuntu/jammy debian/bookworm debian/bullseye" jake/jake-stable jake.deb`,
+		`push an rpm package to el/7 el/8 and el/9:
+	packagecloud publish --rpmvers "el/7 el/8 el/9" jake/jake-stable jake.rpm`},
+	func(f *flag.FlagSet) {
+		f.StringVar(&publishPackageCommandDebvers, "debvers", "", "Debian versions to publish this package to")
+		f.StringVar(&publishPackageCommandRpmvers, "rpmvers", "", "RPM versions to publish this package to")
+		f.BoolVar(&publishPackageCommandDryRun, "dryrun", false, "Do not publish, only show logs on what will be done")
+	},
+	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+		retStatus := subcommands.ExitSuccess
+		repo := f.Arg(0)
+		fileName := f.Arg(1)
+		dryRun := publishPackageCommandDryRun
+		// Retry this many times in case of failed verification post push
+		maxRetries := 2
+		var publishVersions []string
+		if filepath.Ext(fileName) == ".deb" && publishPackageCommandDebvers != "" {
+			publishVersions = strings.Fields(publishPackageCommandDebvers)
+			log.Printf("Publishing to repo %s, the file %s for debian versions: %s", repo, fileName, publishVersions)
+
+		} else if filepath.Ext(fileName) == ".rpm" && publishPackageCommandRpmvers != "" {
+			publishVersions = strings.Fields(publishPackageCommandRpmvers)
+			log.Printf("Publishing to repo %s, the file %s for rpm versions: %s", repo, fileName, publishVersions)
+
+		} else {
+			log.Println("Not a .deb/rpm file or no appropriate --debvers/--rpmvers given")
+			return subcommands.ExitFailure
+		}
+		retryCount := 1
+		for i := 0; i < len(publishVersions); i++ {
+			var err error
+			var details packagecloud.PackageDetail
+			distro := publishVersions[i]
+			dv := strings.Split(distro, "/")
+			log.Printf("Pushing file %s for version: %s", fileName, distro)
+			if !dryRun {
+				details, err = packagecloud.PushPackage(ctx, repo, dv[0], dv[1], fileName)
+			}
+			if err != nil && status.Code(err) != codes.AlreadyExists {
+				log.Printf("Error pushing package %s for %s: %v", fileName, distro, err)
+				retStatus = subcommands.ExitFailure
+				continue
+			} else if status.Code(err) == codes.AlreadyExists { /* Package exists already - overwrite(yank & push) and rerun this iteration */
+				log.Printf("Package exists already, we'll overwrite(yank and then push again: %s(%s)", fileName, distro)
+				err := packagecloud.DeletePackage(ctx, repo, dv[0], dv[1], fileName)
+				if err != nil {
+					log.Printf("Error yanking package: %s (%s): %v", fileName, distro, err)
+					retStatus = subcommands.ExitFailure
+					continue
+				}
+				// Rerun this iteration.
+				i--
+				continue
+			}
+			// Verify if package is pushed to remote, rerun this push if not verified
+			verified, err := verifyPackagePush(details, fileName)
+			if err != nil {
+				log.Printf("Can not verify pushed package on remote: %s(%s): %v", fileName, distro, err)
+				retStatus = subcommands.ExitFailure
+				continue
+			}
+			if !verified && (retryCount <= maxRetries) {
+				log.Printf("Verification failed for %s(%s), will retry push, attempt #%d", fileName, distro, retryCount)
+				retryCount++
+				i--
+				continue
+			} else if retryCount > maxRetries {
+				log.Printf("Exceeded push retries for %s(%s)", fileName, distro)
+				retStatus = subcommands.ExitFailure
+				retryCount = 1
+				continue
+			}
+
+		}
+		return retStatus
+	},
+}
+
+// Retrieve the package details provided by packagecloud and verify md5sum to that from
+// the file on disk
+func verifyPackagePush(detail packagecloud.PackageDetail, fileName string) (bool, error) {
+	fd, err := os.OpenFile(fileName, os.O_RDONLY, 044)
+	if err != nil {
+		log.Printf("Error opening file: %s: %v", fileName, err)
+		return false, err
+	}
+	defer fd.Close()
+	h := md5.New()
+	_, err = io.Copy(h, fd)
+	if err != nil {
+		log.Printf("I/O error: calculating md5sum: %s: %v", fileName, err)
+		return false, err
+	}
+	md5Sum := hex.EncodeToString(h.Sum(nil))
+	log.Printf("md5sum of file on disk: %s, on pc remote: %s", md5Sum, detail.Md5Sum)
+	if detail.Md5Sum != md5Sum {
+		log.Printf("File checksums different: on disk: %s, on packagecloud: %s", md5Sum, detail.Md5Sum)
+		return false, nil
+	}
+	return true, nil
 }
 
 func splitPackageTarget(target string) (repos, distro, version string, n int) {
