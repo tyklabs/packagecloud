@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -21,13 +20,66 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func PushPackage(ctx context.Context, repos, distro, version string, fpath string) error {
+type PackageDetail struct {
+	Name               string    `json:"name"`
+	Arch               string    `json:"architecture"`
+	Release            string    `json:"release"`
+	DistroVersion      string    `json:"distro_version"`
+	CreateTime         time.Time `json:"created_at"`
+	Version            string    `json:"version"`
+	Filename           string    `json:"filename"`
+	Size               string    `json:"size"`
+	Type               string    `json:"type"`
+	UploaderName       string    `json:"uploader_name"`
+	Indexed            bool      `json:"indexed"`
+	PackageURL         string    `json:"package_url"`
+	DownloadURL        string    `json:"download_url"`
+	DownloadsCountURL  string    `json:"downloads_count_url"`
+	DownloadsDetailURL string    `json:"downloads_detail_url"`
+	Md5Sum             string    `json:"md5sum"`
+}
+
+func ShowPackage(ctx context.Context, packageURL string) (PackageDetail, error) {
+	var detail PackageDetail
+	var buf bytes.Buffer
+	url := "https://packagecloud.io" + packageURL
+	req, err := http.NewRequest("GET", url, &buf)
+	if err != nil {
+		return detail, status.Errorf(codes.InvalidArgument, "http newrequest err: %v", err)
+	}
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Accept", "application/json")
+
+	token := packagecloudToken(ctx)
+	req.SetBasicAuth(token, "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return detail, status.Errorf(codes.InvalidArgument, "http get err: %v", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		err := json.NewDecoder(resp.Body).Decode(&detail)
+		if err != nil {
+			return detail, status.Errorf(codes.Internal, "json parse err: %v", err)
+		}
+	default:
+		b, _ := io.ReadAll(resp.Body)
+		return detail, status.Errorf(codes.Internal, "invalid response: %s err: %q", resp.Status, b)
+	}
+
+	return detail, nil
+}
+
+func PushPackage(ctx context.Context, repos, distro, version string, fpath string) (PackageDetail, error) {
 	var distroVersionID string
 	var ok bool
+	var details PackageDetail
 
 	ds, err := GetDistributions(ctx)
 	if err != nil {
-		return err
+		return details, err
 	}
 	switch filepath.Ext(fpath) {
 	case ".deb":
@@ -44,25 +96,25 @@ func PushPackage(ctx context.Context, repos, distro, version string, fpath strin
 		distroVersionID, ok = findDistroVersionID(ds.Py, distro, version)
 	}
 	if !ok {
-		return status.Errorf(codes.InvalidArgument, "unknown distribution: %s/%s", distro, version)
+		return details, status.Errorf(codes.InvalidArgument, "unknown distribution: %s/%s", distro, version)
 	}
 
 	var r io.ReadCloser
 	if strings.HasPrefix(fpath, "http://") || strings.HasPrefix(fpath, "https://") {
 		resp, err := http.Get(fpath)
 		if err != nil {
-			return status.Errorf(codes.InvalidArgument, "http GET: %s", err)
+			return details, status.Errorf(codes.InvalidArgument, "http GET: %s", err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode > 400 {
-			body, _ := ioutil.ReadAll(resp.Body)
-			return status.Errorf(codes.InvalidArgument, "http GET: %s\n>> %q", resp.Status, body)
+			body, _ := io.ReadAll(resp.Body)
+			return details, status.Errorf(codes.InvalidArgument, "http GET: %s\n>> %q", resp.Status, body)
 		}
 		r = resp.Body
 	} else {
 		r, err = os.Open(fpath)
 		if err != nil {
-			return status.Errorf(codes.InvalidArgument, "file open: %s", err)
+			return details, status.Errorf(codes.InvalidArgument, "file open: %s", err)
 		}
 		defer r.Close()
 	}
@@ -72,24 +124,24 @@ func PushPackage(ctx context.Context, repos, distro, version string, fpath strin
 	mw := multipart.NewWriter(&buf)
 	if distroVersionID != "" {
 		if err := mw.WriteField(`package[distro_version_id]`, distroVersionID); err != nil {
-			return status.Errorf(codes.InvalidArgument, "multipart: %s", err)
+			return details, status.Errorf(codes.InvalidArgument, "multipart: %s", err)
 		}
 	}
 	w, err := mw.CreateFormFile(`package[package_file]`, fname)
 	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "multipart: %s", err)
+		return details, status.Errorf(codes.InvalidArgument, "multipart: %s", err)
 	}
 	if _, err := io.Copy(w, r); err != nil {
-		return status.Errorf(codes.InvalidArgument, "file read: %s", err)
+		return details, status.Errorf(codes.InvalidArgument, "file read: %s", err)
 	}
 	if err := mw.Close(); err != nil {
-		return status.Errorf(codes.InvalidArgument, "multipart close: %s", err)
+		return details, status.Errorf(codes.InvalidArgument, "multipart close: %s", err)
 	}
 
 	url := fmt.Sprintf("https://packagecloud.io/api/v1/repos/%s/packages.json", repos)
 	req, err := http.NewRequest("POST", url, &buf)
 	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "http request: %s", err)
+		return details, status.Errorf(codes.InvalidArgument, "http request: %s", err)
 	}
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Content-Type", mw.FormDataContentType())
@@ -100,28 +152,16 @@ func PushPackage(ctx context.Context, repos, distro, version string, fpath strin
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "http post: %s", err)
+		return details, status.Errorf(codes.InvalidArgument, "http post: %s", err)
 	}
 	defer resp.Body.Close()
 
-	return processResponse(resp)
-}
-
-type PackageDetail struct {
-	Name               string    `json:"name"`
-	Arch               string    `json:"architecture"`
-	Release            string    `json:"release"`
-	DistroVersion      string    `json:"distro_version"`
-	CreateTime         time.Time `json:"created_at"`
-	Version            string    `json:"version"`
-	Type               string    `json:"type"`
-	Filename           string    `json:"filename"`
-	UploaderName       string    `json:"uploader_name"`
-	Indexed            bool      `json:"indexed"`
-	PackageURL         string    `json:"package_url"`
-	DownloadURL        string    `json:"download_url"`
-	DownloadsCountURL  string    `json:"downloads_count_url"`
-	DownloadsDetailURL string    `json:"downloads_detail_url"`
+	b, err := processResponse(resp)
+	if err != nil {
+		return details, err
+	}
+	err = json.Unmarshal(b, &details)
+	return details, err
 }
 
 func SearchPackage(ctx context.Context, repos, distro string, perPage int, query, filter string) ([]PackageDetail, error) {
@@ -182,7 +222,7 @@ func SearchPackage(ctx context.Context, repos, distro string, perPage int, query
 			}
 			details = append(details, detail...)
 		default:
-			b, _ := ioutil.ReadAll(resp.Body)
+			b, _ := io.ReadAll(resp.Body)
 			return nil, fmt.Errorf("resp: %s, %q", resp.Status, b)
 		}
 	}
@@ -201,7 +241,7 @@ func PromotePackage(ctx context.Context, dstRepos, srcRepo, distro, version stri
 
 	_, fname := filepath.Split(fpath)
 	url := fmt.Sprintf("https://packagecloud.io/api/v1/repos/%s/%s/%s/%s/promote.json", srcRepo, distro, version, fname)
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequest("POST", url, &buf)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "http request: %s", err)
 	}
@@ -217,8 +257,8 @@ func PromotePackage(ctx context.Context, dstRepos, srcRepo, distro, version stri
 		return status.Errorf(codes.InvalidArgument, "http post: %s", err)
 	}
 	defer resp.Body.Close()
-
-	return processResponse(resp)
+	_, err = processResponse(resp)
+	return err
 }
 
 func DeletePackage(ctx context.Context, repos, distro, version string, fpath string) error {
@@ -240,5 +280,6 @@ func DeletePackage(ctx context.Context, repos, distro, version string, fpath str
 	}
 	defer resp.Body.Close()
 
-	return processResponse(resp)
+	_, err = processResponse(resp)
+	return err
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -61,10 +63,11 @@ var pushPackageCommandVerifyExist bool
 var pushPackageCommand = &commandBase{
 	"push",
 	"pushing a package",
-	"push name/repo/distro/version filepath",
+	"push [-verify] name/repo/distro/version filepath",
 	[]string{"packagecloud push example-user/example-repository/ubuntu/xenial /tmp/example.deb"},
 	func(f *flag.FlagSet) {
-		f.BoolVar(&pushPackageCommandVerifyExist, "verify exist package", false, "ignore already pushed error")
+		f.BoolVar(&pushPackageCommandVerifyExist, "verify", false, "Verify whether packages were successfully uploaded to pakcagecloud - compares md5sum of file on disk and on remote")
+
 	},
 	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 		repos, distro, version, n := splitPackageTarget(f.Arg(0))
@@ -85,15 +88,30 @@ var pushPackageCommand = &commandBase{
 		for _, file := range files {
 			_, fname := filepath.Split(file)
 			log.Printf("push: %s", fname)
-			if err := packagecloud.PushPackage(ctx, repos, distro, version, file); err != nil {
-				if !pushPackageCommandVerifyExist && status.Code(err) == codes.AlreadyExists {
+			details, err := packagecloud.PushPackage(ctx, repos, distro, version, file)
+			if err != nil {
+				if status.Code(err) == codes.AlreadyExists {
 					log.Printf("%s already exist", fname)
 					continue
 				}
 				log.Printf("%s %s", fname, err)
 				return subcommands.ExitFailure
 			}
+			// Retrieve the package details provided by packagecloud and verify md5sum to that from
+			// the file on disk
+			if pushPackageCommandVerifyExist {
+				verified, err := verifyPackagePush(details, file)
+				if err != nil {
+					log.Printf("Error verifying push: %s(%s/%s): %v", file, distro, version, err)
+					return subcommands.ExitFailure
+				}
+				if !verified {
+					log.Printf("md5sum verification failed for package on remote: %s(%s/%s)", file, distro, version)
+					return subcommands.ExitFailure
+				}
+			}
 		}
+
 		return subcommands.ExitSuccess
 	},
 }
@@ -209,6 +227,195 @@ var promotePackageCommand = &commandBase{
 	},
 }
 
+var promoteVersionDryRun bool
+var promoteVersionPackageCommand = &commandBase{
+	"promoteversion",
+	"promoteversion all packages having the given version",
+	"promote name/src_repo version name/dst_repo",
+	[]string{"packagecloud promoteversion example-user/repo-unstable  1.0.0 example-user/repo-stable"},
+	func(f *flag.FlagSet) {
+		f.BoolVar(&promoteVersionDryRun, "dryrun", false, "Do not actually promote, just list the ones that will be promoted")
+
+	},
+	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+		if len(f.Args()) != 3 {
+			return subcommands.ExitUsageError
+		}
+		srcRepo := f.Arg(0)
+		version := f.Arg(1)
+		dstRepo := f.Arg(2)
+		if srcRepo == "" || version == "" || dstRepo == "" {
+			return subcommands.ExitUsageError
+		}
+		if promoteVersionDryRun {
+			log.Printf("Dry run: Won't actually do any promotion")
+		}
+		debPkgs, err := packagecloud.SearchPackage(ctx, srcRepo, "", 250, version, "debs")
+		if err != nil {
+			log.Printf("Error getting deb packages info: %s->%s: %v", srcRepo, dstRepo, err)
+		}
+		var promoteList []packagecloud.PackageDetail
+
+		for _, deb := range debPkgs {
+			if deb.Version == version {
+				promoteList = append(promoteList, deb)
+			}
+		}
+		rpmPkgs, err := packagecloud.SearchPackage(ctx, srcRepo, "", 250, version, "rpms")
+		if err != nil {
+			log.Printf("Error getting rpm packages info: %s->%s: %v", srcRepo, dstRepo, err)
+		}
+		for _, rpm := range rpmPkgs {
+			if rpm.Version == version {
+				promoteList = append(promoteList, rpm)
+			}
+		}
+		if len(promoteList) == 0 {
+			log.Printf("No packages to promote")
+			return subcommands.ExitFailure
+		}
+		log.Println("Promoting packages..")
+		summaryDistro := make(map[string][]string)
+		var summaryArch []string
+		var num int
+		var pkg packagecloud.PackageDetail
+		for num, pkg = range promoteList {
+			distro := strings.Split(pkg.DistroVersion, "/")
+			info, err := packagecloud.ShowPackage(ctx, pkg.PackageURL)
+			if err != nil {
+				log.Println(err)
+				return subcommands.ExitFailure
+			}
+			if !promoteVersionDryRun {
+				if err := packagecloud.PromotePackage(ctx, dstRepo, srcRepo, distro[0], distro[1], pkg.Filename); err != nil {
+					log.Println(err)
+					return subcommands.ExitFailure
+				}
+			} else {
+				log.Printf("Promoting package %s(%s/%s) from %s->%s", pkg.Filename, distro[0], distro[1], srcRepo, dstRepo)
+			}
+			summaryDistro[pkg.Type] = append(summaryDistro[pkg.Type], info.DistroVersion)
+			summaryArch = append(summaryArch, info.Arch)
+		}
+		// display a nice summary about the promotion
+		fmt.Printf("%d packages having %s architectures for %s were promoted from %s to %s\n", num+1, strings.Join(uniqueSummary(summaryArch), ","), version, srcRepo, dstRepo)
+		fmt.Printf("Debian based distro versions: %s\n", strings.Join(uniqueSummary(summaryDistro["deb"]), ","))
+		fmt.Printf("RPM based distro versions: %s\n", strings.Join(uniqueSummary(summaryDistro["rpm"]), ","))
+		return subcommands.ExitSuccess
+	},
+}
+
+var publishPackageCommandDebvers string
+var publishPackageCommandRpmvers string
+var publishPackageCommandDryRun bool
+var publishPackageCommand = &commandBase{
+	"publish",
+	"publish a deb/rpm package across multiple distro versions, " +
+		"please provide --debversions or --rpmversions accordingly",
+	`publish [--rpmvers  "distro/ver1 distro/ver2..."] [--debvers "distro/ver1 distro/ver2"...]  name/repo filepath`,
+	[]string{`push a deb package to ubuntu/jammy, debian/bookworm and debian/bullseye:
+	packagecloud publish --debvers "ubuntu/jammy debian/bookworm debian/bullseye" jake/jake-stable jake.deb`,
+		`push an rpm package to el/7 el/8 and el/9:
+	packagecloud publish --rpmvers "el/7 el/8 el/9" jake/jake-stable jake.rpm`},
+	func(f *flag.FlagSet) {
+		f.StringVar(&publishPackageCommandDebvers, "debvers", "", "Debian versions to publish this package to")
+		f.StringVar(&publishPackageCommandRpmvers, "rpmvers", "", "RPM versions to publish this package to")
+		f.BoolVar(&publishPackageCommandDryRun, "dryrun", false, "Do not publish, only show logs on what will be done")
+	},
+	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+		retStatus := subcommands.ExitSuccess
+		repo := f.Arg(0)
+		fileName := f.Arg(1)
+		dryRun := publishPackageCommandDryRun
+		// Retry this many times in case of failed verification post push
+		maxRetries := 2
+		var publishVersions []string
+		if filepath.Ext(fileName) == ".deb" && publishPackageCommandDebvers != "" {
+			publishVersions = strings.Fields(publishPackageCommandDebvers)
+			log.Printf("Publishing to repo %s, the file %s for debian versions: %s", repo, fileName, publishVersions)
+
+		} else if filepath.Ext(fileName) == ".rpm" && publishPackageCommandRpmvers != "" {
+			publishVersions = strings.Fields(publishPackageCommandRpmvers)
+			log.Printf("Publishing to repo %s, the file %s for rpm versions: %s", repo, fileName, publishVersions)
+
+		} else {
+			log.Println("Not a .deb/rpm file or no appropriate --debvers/--rpmvers given")
+			return subcommands.ExitFailure
+		}
+		retryCount := 1
+		for i := 0; i < len(publishVersions); i++ {
+			var err error
+			var details packagecloud.PackageDetail
+			distro := publishVersions[i]
+			dv := strings.Split(distro, "/")
+			log.Printf("Pushing file %s for version: %s", fileName, distro)
+			if !dryRun {
+				details, err = packagecloud.PushPackage(ctx, repo, dv[0], dv[1], fileName)
+			}
+			if err != nil && status.Code(err) != codes.AlreadyExists {
+				log.Printf("Error pushing package %s for %s: %v", fileName, distro, err)
+				retStatus = subcommands.ExitFailure
+				continue
+			} else if status.Code(err) == codes.AlreadyExists { /* Package exists already - overwrite(yank & push) and rerun this iteration */
+				log.Printf("Package exists already, we'll overwrite(yank and then push again: %s(%s)", fileName, distro)
+				err := packagecloud.DeletePackage(ctx, repo, dv[0], dv[1], fileName)
+				if err != nil {
+					log.Printf("Error yanking package: %s (%s): %v", fileName, distro, err)
+					retStatus = subcommands.ExitFailure
+					continue
+				}
+				// Rerun this iteration.
+				i--
+				continue
+			}
+			// Verify if package is pushed to remote, rerun this push if not verified
+			verified, err := verifyPackagePush(details, fileName)
+			if err != nil {
+				log.Printf("Can not verify pushed package on remote: %s(%s): %v", fileName, distro, err)
+				retStatus = subcommands.ExitFailure
+				continue
+			}
+			if !verified && (retryCount <= maxRetries) {
+				log.Printf("Verification failed for %s(%s), will retry push, attempt #%d", fileName, distro, retryCount)
+				retryCount++
+				i--
+				continue
+			} else if retryCount > maxRetries {
+				log.Printf("Exceeded push retries for %s(%s)", fileName, distro)
+				retStatus = subcommands.ExitFailure
+				retryCount = 1
+				continue
+			}
+
+		}
+		return retStatus
+	},
+}
+
+// Retrieve the package details provided by packagecloud and verify md5sum to that from
+// the file on disk
+func verifyPackagePush(detail packagecloud.PackageDetail, fileName string) (bool, error) {
+	fd, err := os.OpenFile(fileName, os.O_RDONLY, 044)
+	if err != nil {
+		log.Printf("Error opening file: %s: %v", fileName, err)
+		return false, err
+	}
+	defer fd.Close()
+	h := md5.New()
+	_, err = io.Copy(h, fd)
+	if err != nil {
+		log.Printf("I/O error: calculating md5sum: %s: %v", fileName, err)
+		return false, err
+	}
+	md5Sum := hex.EncodeToString(h.Sum(nil))
+	log.Printf("md5sum of file on disk: %s, on pc remote: %s", md5Sum, detail.Md5Sum)
+	if detail.Md5Sum != md5Sum {
+		log.Printf("File checksums different: on disk: %s, on packagecloud: %s", md5Sum, detail.Md5Sum)
+		return false, nil
+	}
+	return true, nil
+}
+
 func splitPackageTarget(target string) (repos, distro, version string, n int) {
 	ss := strings.SplitN(target, "/", 4)
 	n = len(ss)
@@ -222,6 +429,26 @@ func splitPackageTarget(target string) (repos, distro, version string, n int) {
 		version = ss[3]
 	}
 	return
+}
+
+// uniqueSummary takes a slice having package promotion summary list(slice)
+// and returns a slice with unique elements after removing any similiar entries
+func uniqueSummary(in []string) []string {
+	var u []string
+	t := make(map[string]bool)
+	for _, v := range in {
+		switch v {
+		case "aarch64":
+			v = "arm64"
+		case "x86_64":
+			v = "amd64"
+		}
+		if _, ok := t[v]; !ok {
+			t[v] = true
+			u = append(u, v)
+		}
+	}
+	return u
 }
 
 var helpDistroCommand = &commandBase{
