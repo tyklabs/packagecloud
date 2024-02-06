@@ -339,8 +339,9 @@ var publishPackageCommand = &commandBase{
 			log.Printf("Publishing to repo %s, the file %s for rpm versions: %s", repo, fileName, publishVersions)
 
 		} else {
-			log.Println("Not a .deb/rpm file or no appropriate --debvers/--rpmvers given")
-			return subcommands.ExitFailure
+			log.Println("Not a .deb/rpm file or no appropriate --debvers/--rpmvers given, exiting..")
+			// Exit with success to avoid goreleaser complaining on binary files.
+			return subcommands.ExitSuccess
 		}
 		retryCount := 1
 		for i := 0; i < len(publishVersions); i++ {
