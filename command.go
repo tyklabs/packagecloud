@@ -6,9 +6,11 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -37,12 +39,13 @@ func (c *commandBase) Synopsis() string {
 }
 
 func (c *commandBase) Usage() string {
-	w := bytes.NewBufferString(c.usage)
+	w := bytes.NewBufferString(c.synopsis)
 	fmt.Fprintln(w)
+	fmt.Fprintf(w, "\nusage:\n\t%s\n", c.usage)
 	if len(c.examples) > 0 {
-		fmt.Fprintln(w, "\nexample:")
-		for _, ex := range c.examples {
-			fmt.Fprintf(w, "    %s\n", ex)
+		fmt.Fprintln(w, "\nexamples:")
+		for i, ex := range c.examples {
+			fmt.Fprintf(w, "\t%d. %s\n\n", i+1, ex)
 		}
 	}
 	return w.String()
@@ -214,6 +217,7 @@ var promotePackageCommand = &commandBase{
 	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 		srcRepos, distro, version, n := splitPackageTarget(f.Arg(0))
 		if n != 4 {
+
 			return subcommands.ExitUsageError
 		}
 		fpath := f.Arg(1)
@@ -230,15 +234,18 @@ var promotePackageCommand = &commandBase{
 var promoteVersionDryRun bool
 var promoteVersionPackageCommand = &commandBase{
 	"promoteversion",
-	"promoteversion all packages having the given version",
-	"promote name/src_repo version name/dst_repo",
-	[]string{"packagecloud promoteversion example-user/repo-unstable  1.0.0 example-user/repo-stable"},
+	"promote all packages having the given version",
+	"promote <name/src_repo> <version> <name/dst_repo>",
+	[]string{`promote all packages with version 1.0.0 from jake/jake-unstable to jake/jake-stable:
+		packagecloud promoteversion jake/jake-unstable 1.0.0 jake/jake-stable`},
 	func(f *flag.FlagSet) {
 		f.BoolVar(&promoteVersionDryRun, "dryrun", false, "Do not actually promote, just list the ones that will be promoted")
 
 	},
 	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
 		if len(f.Args()) != 3 {
+			fmt.Println("error: must specify all three arguments..")
+			f.Usage()
 			return subcommands.ExitUsageError
 		}
 		srcRepo := f.Arg(0)
@@ -314,9 +321,9 @@ var publishPackageCommand = &commandBase{
 		"please provide --debversions or --rpmversions accordingly",
 	`publish [--rpmvers  "distro/ver1 distro/ver2..."] [--debvers "distro/ver1 distro/ver2"...]  name/repo filepath`,
 	[]string{`push a deb package to ubuntu/jammy, debian/bookworm and debian/bullseye:
-	packagecloud publish --debvers "ubuntu/jammy debian/bookworm debian/bullseye" jake/jake-stable jake.deb`,
+		packagecloud publish --debvers "ubuntu/jammy debian/bookworm debian/bullseye" jake/jake-stable jake.deb`,
 		`push an rpm package to el/7 el/8 and el/9:
-	packagecloud publish --rpmvers "el/7 el/8 el/9" jake/jake-stable jake.rpm`},
+		packagecloud publish --rpmvers "el/7 el/8 el/9" jake/jake-stable jake.rpm`},
 	func(f *flag.FlagSet) {
 		f.StringVar(&publishPackageCommandDebvers, "debvers", "", "Debian versions to publish this package to")
 		f.StringVar(&publishPackageCommandRpmvers, "rpmvers", "", "RPM versions to publish this package to")
@@ -330,6 +337,13 @@ var publishPackageCommand = &commandBase{
 		// Retry this many times in case of failed verification post push
 		maxRetries := 2
 		var publishVersions []string
+
+		if len(f.Args()) != 2 {
+			fmt.Println("error: all two arguments are mandatory..")
+			f.Usage()
+			return subcommands.ExitUsageError
+		}
+
 		if filepath.Ext(fileName) == ".deb" && publishPackageCommandDebvers != "" {
 			publishVersions = strings.Fields(publishPackageCommandDebvers)
 			log.Printf("Publishing to repo %s, the file %s for debian versions: %s", repo, fileName, publishVersions)
@@ -349,29 +363,48 @@ var publishPackageCommand = &commandBase{
 			var details packagecloud.PackageDetail
 			distro := publishVersions[i]
 			dv := strings.Split(distro, "/")
+
+			if len(dv) != 2 {
+				log.Printf("Incorrect distro/version entry: %s, must be in the format: distro/version", dv)
+				return subcommands.ExitFailure
+			}
+
 			log.Printf("Pushing file %s for version: %s", fileName, distro)
 			if !dryRun {
 				details, err = packagecloud.PushPackage(ctx, repo, dv[0], dv[1], fileName)
 			}
-			if err != nil && status.Code(err) != codes.AlreadyExists {
-				log.Printf("Error pushing package %s for %s: %v", fileName, distro, err)
-				retStatus = subcommands.ExitFailure
-				continue
-			} else if status.Code(err) == codes.AlreadyExists { /* Package exists already - overwrite(yank & push) and rerun this iteration */
-				log.Printf("Package exists already, we'll overwrite(yank and then push again: %s(%s)", fileName, distro)
-				err := packagecloud.DeletePackage(ctx, repo, dv[0], dv[1], fileName)
-				if err != nil {
-					log.Printf("Error yanking package: %s (%s): %v", fileName, distro, err)
-					retStatus = subcommands.ExitFailure
+			if err != nil {
+				if status.Code(err) == codes.Unauthenticated {
+					log.Printf("Unauthenticated request, check PACKAGECLOUD_TOKEN: %v", err)
+					return subcommands.ExitFailure
+				}
+				if status.Code(err) == codes.Unavailable {
+					log.Printf("file not available: %v", err)
+					return subcommands.ExitFailure
+				}
+				if status.Code(err) == codes.AlreadyExists { /* Package exists already - overwrite(yank & push) and rerun this iteration */
+					log.Printf("Package exists already, we'll overwrite(yank and then push again: %s(%s)", fileName, distro)
+					err := packagecloud.DeletePackage(ctx, repo, dv[0], dv[1], fileName)
+					if err != nil {
+						log.Printf("Error yanking package: %s (%s): %v", fileName, distro, err)
+						retStatus = subcommands.ExitFailure
+						continue
+					}
+					// Rerun this iteration after deletion.
+					i--
 					continue
 				}
-				// Rerun this iteration.
-				i--
+				log.Printf("Error pushing package %s for %s: %v", fileName, distro, err)
+				retStatus = subcommands.ExitFailure
 				continue
 			}
 			// Verify if package is pushed to remote, rerun this push if not verified
 			verified, err := verifyPackagePush(details, fileName)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					log.Printf("%v", err)
+					return subcommands.ExitFailure
+				}
 				log.Printf("Can not verify pushed package on remote: %s(%s): %v", fileName, distro, err)
 				retStatus = subcommands.ExitFailure
 				continue
@@ -398,7 +431,6 @@ var publishPackageCommand = &commandBase{
 func verifyPackagePush(detail packagecloud.PackageDetail, fileName string) (bool, error) {
 	fd, err := os.OpenFile(fileName, os.O_RDONLY, 044)
 	if err != nil {
-		log.Printf("Error opening file: %s: %v", fileName, err)
 		return false, err
 	}
 	defer fd.Close()

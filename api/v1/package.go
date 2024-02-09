@@ -114,7 +114,7 @@ func PushPackage(ctx context.Context, repos, distro, version string, fpath strin
 	} else {
 		r, err = os.Open(fpath)
 		if err != nil {
-			return details, status.Errorf(codes.InvalidArgument, "file open: %s", err)
+			return details, status.Errorf(codes.Unavailable, "file open: %s", err)
 		}
 		defer r.Close()
 	}

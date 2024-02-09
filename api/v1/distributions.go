@@ -3,11 +3,13 @@ package packagecloud
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var distributions = &Distributions{}
@@ -43,7 +45,7 @@ func cacheDistributions(ctx context.Context) (err error) {
 func getDistributions(ctx context.Context) (*Distributions, error) {
 	req, err := http.NewRequest("GET", "https://packagecloud.io/api/v1/distributions.json", nil)
 	if err != nil {
-		return nil, fmt.Errorf("http request: %s", err)
+		return nil, status.Errorf(codes.Internal, "http request: %s", err)
 	}
 	req.Header.Set("Accept", "application/json")
 
@@ -52,7 +54,7 @@ func getDistributions(ctx context.Context) (*Distributions, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http post: %s", err)
+		return nil, status.Errorf(codes.Internal, "http post: %s", err)
 	}
 	defer resp.Body.Close()
 
@@ -60,12 +62,14 @@ func getDistributions(ctx context.Context) (*Distributions, error) {
 	case http.StatusOK:
 		var d Distributions
 		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
-			return nil, fmt.Errorf("json decode: %s", err)
+			return nil, status.Errorf(codes.Internal, "json decode: %s", err)
 		}
 		return &d, nil
+	case http.StatusUnauthorized:
+		return nil, status.Errorf(codes.Unauthenticated, "resp: %s", resp.Status)
 	default:
-		b, _ := ioutil.ReadAll(resp.Body)
-		return nil, fmt.Errorf("resp: %s, %q", resp.Status, b)
+		b, _ := io.ReadAll(resp.Body)
+		return nil, status.Errorf(codes.Internal, "resp: %s, %q", resp.Status, b)
 	}
 }
 
