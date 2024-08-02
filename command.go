@@ -250,7 +250,7 @@ var promoteVersionPackageCommand = &commandBase{
 		if promoteVersionDryRun {
 			log.Printf("Dry run: Won't actually do any promotion")
 		}
-		debPkgs, err := packagecloud.SearchPackage(ctx, srcRepo, "", 250, version, "debs")
+		debPkgs, err := packagecloud.SearchPackage(ctx, srcRepo, "", 250, version, "deb")
 		if err != nil {
 			log.Printf("Error getting deb packages info: %s->%s: %v", srcRepo, dstRepo, err)
 		}
@@ -261,7 +261,7 @@ var promoteVersionPackageCommand = &commandBase{
 				promoteList = append(promoteList, deb)
 			}
 		}
-		rpmPkgs, err := packagecloud.SearchPackage(ctx, srcRepo, "", 250, version, "rpms")
+		rpmPkgs, err := packagecloud.SearchPackage(ctx, srcRepo, "", 250, version, "rpm")
 		if err != nil {
 			log.Printf("Error getting rpm packages info: %s->%s: %v", srcRepo, dstRepo, err)
 		}
