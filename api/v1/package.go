@@ -36,7 +36,10 @@ type PackageDetail struct {
 	DownloadURL        string    `json:"download_url"`
 	DownloadsCountURL  string    `json:"downloads_count_url"`
 	DownloadsDetailURL string    `json:"downloads_detail_url"`
+	PromoteURL         string    `json:"promote_url"`
+	DestroyURL         string    `json:"destroy_url"`
 	Md5Sum             string    `json:"md5sum"`
+	Sha256Sum          string    `json:"sha256sum"`
 }
 
 func ShowPackage(ctx context.Context, packageURL string) (PackageDetail, error) {
