@@ -28,6 +28,7 @@ func main() {
 	subcommands.Register(searchPackageCommand, "package")
 	subcommands.Register(promotePackageCommand, "package")
 	subcommands.Register(deletePackageCommand, "package")
+	subcommands.Register(deleteVersionCommand, "package")
 	subcommands.Register(helpDistroCommand, "help")
 	subcommands.Register(promoteVersionPackageCommand, "package")
 	subcommands.Register(publishPackageCommand, "package")

@@ -28,7 +28,7 @@ type commandBase struct {
 	usage        string
 	examples     []string
 	setFlagsFunc func(f *flag.FlagSet)
-	executeFunc  func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus
+	executeFunc  func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus
 }
 
 func (c *commandBase) Name() string { return c.name }
@@ -55,21 +55,21 @@ func (c *commandBase) SetFlags(f *flag.FlagSet) {
 	c.setFlagsFunc(f)
 }
 
-func (c *commandBase) Execute(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+func (c *commandBase) Execute(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 	return c.executeFunc(ctx, f, args)
 }
 
 var pushPackageCommandVerifyExist bool
 var pushPackageCommand = &commandBase{
 	"push",
-	"pushing a package",
+	"push a package",
 	"push [-verify] name/repo/distro/version filepath",
 	[]string{"packagecloud push example-user/example-repository/ubuntu/xenial /tmp/example.deb"},
 	func(f *flag.FlagSet) {
 		f.BoolVar(&pushPackageCommandVerifyExist, "verify", false, "Verify whether packages were successfully uploaded to pakcagecloud - compares md5sum of file on disk and on remote")
 
 	},
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 		repos, distro, version, n := splitPackageTarget(f.Arg(0))
 		if n < 3 {
 			return subcommands.ExitUsageError
@@ -122,7 +122,7 @@ var searchPackageCommand = &commandBase{
 	"list name/repo query [version]",
 	[]string{"packagecloud list example-user/example-repository example 1.0.0"},
 	nil,
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 		repos, distro, _, n := splitPackageTarget(f.Arg(0))
 		if n < 2 {
 			return subcommands.ExitUsageError
@@ -150,7 +150,7 @@ var pullPackageCommand = &commandBase{
 	"pull name/repo[/distro/version] filename",
 	[]string{"packagecloud pull example-user/example-repository example_1.0.0_all.deb"},
 	nil,
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 		repos, distro, version, n := splitPackageTarget(f.Arg(0))
 		if n < 2 {
 			return subcommands.ExitUsageError
@@ -186,11 +186,11 @@ var pullPackageCommand = &commandBase{
 
 var deletePackageCommand = &commandBase{
 	"rm",
-	"deleting a package",
+	"delete a package",
 	"rm name/repo/distro/version filepath",
 	[]string{"packagecloud rm example-user/example-repository/ubuntu/xenial example_1.0.1-1_amd64.deb"},
 	nil,
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 		repos, distro, version, n := splitPackageTarget(f.Arg(0))
 		if n != 4 {
 			return subcommands.ExitUsageError
@@ -205,13 +205,44 @@ var deletePackageCommand = &commandBase{
 	},
 }
 
+var deleteVersionCommand = &commandBase{
+	"rmv",
+	"remove a package version",
+	"rmv name/repo version",
+	[]string{"packagecloud rmv example-user/example-repository 1.0.0"},
+	nil,
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
+		repos, distro, _, n := splitPackageTarget(f.Arg(0))
+		if n < 2 {
+			return subcommands.ExitUsageError
+		}
+		version := f.Arg(1)
+		details, err := packagecloud.SearchPackage(ctx, repos, distro, 0, version, "")
+		if err != nil {
+			log.Println(err)
+			return subcommands.ExitFailure
+		}
+		for _, detail := range details {
+			if detail.Version == version {
+				fmt.Printf("deleting %s %s %s %s\n", detail.DistroVersion, detail.Filename, detail.Name, detail.Version)
+				err := packagecloud.DeleteURL(ctx, "https://packagecloud.io"+detail.DestroyURL)
+				if err != nil {
+					log.Println(err)
+				}
+			}
+		}
+
+		return subcommands.ExitSuccess
+	},
+}
+
 var promotePackageCommand = &commandBase{
 	"promote",
 	"promote package",
 	"promote name/src_repo/distro/version filepath name/dst_repo",
 	[]string{"packagecloud promote example-user/repo1/ubuntu/xenial example_1.0-1_amd64.deb example-user/repo2"},
 	nil,
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 		srcRepos, distro, version, n := splitPackageTarget(f.Arg(0))
 		if n != 4 {
 			return subcommands.ExitUsageError
@@ -230,14 +261,14 @@ var promotePackageCommand = &commandBase{
 var promoteVersionDryRun bool
 var promoteVersionPackageCommand = &commandBase{
 	"promoteversion",
-	"promoteversion all packages having the given version",
+	"promote all packages having the given version",
 	"promote name/src_repo version name/dst_repo",
 	[]string{"packagecloud promoteversion example-user/repo-unstable  1.0.0 example-user/repo-stable"},
 	func(f *flag.FlagSet) {
 		f.BoolVar(&promoteVersionDryRun, "dryrun", false, "Do not actually promote, just list the ones that will be promoted")
 
 	},
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 		if len(f.Args()) != 3 {
 			return subcommands.ExitUsageError
 		}
@@ -322,7 +353,7 @@ var publishPackageCommand = &commandBase{
 		f.StringVar(&publishPackageCommandRpmvers, "rpmvers", "", "RPM versions to publish this package to")
 		f.BoolVar(&publishPackageCommandDryRun, "dryrun", false, "Do not publish, only show logs on what will be done")
 	},
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
 		retStatus := subcommands.ExitSuccess
 		repo := f.Arg(0)
 		fileName := f.Arg(1)
@@ -458,8 +489,8 @@ var helpDistroCommand = &commandBase{
 	"distro [deb/py]",
 	[]string{"packagecloud distro", "packagecloud distro deb", "packagecloud distro deb ubuntu", "packagecloud distro | jq .deb"},
 	nil,
-	func(ctx context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
-		var v interface{}
+	func(ctx context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
+		var v any
 		distributions, err := packagecloud.GetDistributions(ctx)
 		if err != nil {
 			log.Println(err)

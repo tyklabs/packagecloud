@@ -286,3 +286,25 @@ func DeletePackage(ctx context.Context, repos, distro, version string, fpath str
 	_, err = processResponse(resp)
 	return err
 }
+
+// DeleteURL DELETEs the cupplied URL
+func DeleteURL(ctx context.Context, url string) error {
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "http request: %s", err)
+	}
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Accept", "application/json")
+
+	token := packagecloudToken(ctx)
+	req.SetBasicAuth(token, "")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "http post: %s", err)
+	}
+	defer resp.Body.Close()
+
+	_, err = processResponse(resp)
+	return err
+}
